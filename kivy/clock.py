@@ -343,6 +343,17 @@ overwrites the config selection. Its possible values are as follows:
   independently; normal events are fps limited while free events are not - is
   used.
 
+Async clock support
+-----------------------
+
+.. versionadded:: 1.10.1
+
+Experimental async support has been added in 1.11.0. The Clock now has an
+:meth:`ClockBaseBehavior.async_tick` and :meth:`ClockBaseBehavior.async_idle`
+method which is used by the kivy EventLoop when the kivy EventLoop is
+executed in a asynchronous manner. When used, the kivy clock does not
+block while idling.
+
 '''
 
 __all__ = (
@@ -366,6 +377,30 @@ try:
 except ImportError:  # https://bugs.python.org/issue3770
     from threading import Event as MultiprocessingEvent
 from threading import Event as ThreadingEvent
+
+async_event = None
+try:
+    from kivy.clock_async import AsyncClockBaseBehavior, \
+        AsyncClockBaseFreeInterruptOnly, AsyncClockBaseInterruptBehavior
+
+    _async_lib = environ.get('KIVY_EVENTLOOP', 'default')
+    if _async_lib == 'trio':
+        import trio
+        async_event = trio.Event
+    elif _async_lib == 'async':
+        import asyncio
+        async_event = asyncio.Event
+except SyntaxError:
+    from kivy.compat import PY3CompatCls
+
+    class AsyncClockBaseBehavior(PY3CompatCls):
+        pass
+
+    class AsyncClockBaseFreeInterruptOnly(PY3CompatCls):
+        pass
+
+    class AsyncClockBaseInterruptBehavior(PY3CompatCls):
+        pass
 
 # some reading: http://gameprogrammingpatterns.com/game-loop.html
 
@@ -455,7 +490,7 @@ except (OSError, ImportError, AttributeError):
         time.sleep(microseconds / 1000000.)
 
 
-class ClockBaseBehavior(object):
+class ClockBaseBehavior(AsyncClockBaseBehavior):
     '''The base of the kivy clock.
     '''
 
@@ -546,12 +581,18 @@ class ClockBaseBehavior(object):
         '''Advance the clock to the next step. Must be called every frame.
         The default clock has a tick() function called by the core Kivy
         framework.'''
+        self.pre_idle()
+        ts = self.time()
+        self.post_idle(ts, self.idle())
 
+    def pre_idle(self):
+        '''Called before :meth:`idle` by :meth:`tick`.
+        '''
         self._release_references()
 
-        ts = self.time()
-        current = self.idle()
-
+    def post_idle(self, ts, current):
+        '''Called after :meth:`idle` by :meth:`tick`.
+        '''
         # tick the current time
         self._frames += 1
         self._fps_counter += 1
@@ -618,17 +659,21 @@ ClockBaseBehavior.time.__doc__ = \
     '''Proxy method for :func:`~kivy.compat.clock`. '''
 
 
-class ClockBaseInterruptBehavior(ClockBaseBehavior):
+class ClockBaseInterruptBehavior(
+        AsyncClockBaseInterruptBehavior, ClockBaseBehavior):
     '''A kivy clock which can be interrupted during a frame to execute events.
     '''
 
     interupt_next_only = False
     _event = None
+    _async_event = None
     _get_min_timeout_func = None
 
     def __init__(self, interupt_next_only=False, **kwargs):
         super(ClockBaseInterruptBehavior, self).__init__(**kwargs)
         self._event = MultiprocessingEvent() if PY2 else ThreadingEvent()
+        if async_event is not None:
+            self._async_event = async_event()
         self.interupt_next_only = interupt_next_only
         self._get_min_timeout_func = self.get_min_timeout
 
@@ -647,6 +692,8 @@ class ClockBaseInterruptBehavior(ClockBaseBehavior):
                 (self.time() - self._last_tick) +  # elapsed time
                 4 / 5. * self.get_resolution()):  # resolution fudge factor
             self._event.set()
+            if self._async_event:
+                self._async_event.set()
 
     def idle(self):
         fps = self._max_fps
@@ -654,7 +701,7 @@ class ClockBaseInterruptBehavior(ClockBaseBehavior):
         resolution = self.get_resolution()
         if fps > 0:
             done, sleeptime = self._check_ready(
-                fps, resolution, 4 / 5. * resolution)
+                fps, resolution, 4 / 5. * resolution, event)
             if not done:
                 event.wait(sleeptime)
 
@@ -669,8 +716,8 @@ class ClockBaseInterruptBehavior(ClockBaseBehavior):
         # the `self._last_tick = current` bytecode.
         return current
 
-    def _check_ready(self, fps, min_sleep, undershoot):
-        if self._event.is_set():
+    def _check_ready(self, fps, min_sleep, undershoot, event):
+        if event.is_set():
             return True, 0
 
         t = self._get_min_timeout_func()
@@ -733,7 +780,8 @@ class ClockBaseFreeInterruptAll(
 
 
 class ClockBaseFreeInterruptOnly(
-        ClockBaseInterruptFreeBehavior, CyClockBaseFree):
+        AsyncClockBaseFreeInterruptOnly, ClockBaseInterruptFreeBehavior,
+        CyClockBaseFree):
     '''The ``free_only`` kivy clock. See module for details.
     '''
 

@@ -308,6 +308,23 @@ Here is a simple example of how on_pause() should be used::
     Both `on_pause` and `on_stop` must save important data because after
     `on_pause` is called, `on_resume` may not be called at all.
 
+Async app
+------------
+
+Experimental async support has been added.
+
+To run an async app the ``KIVY_EVENTLOOP`` environmental should be set
+to ``'async'``. This will start an async loop when :func:`runTouchApp` or
+:meth:`App.run` are run and will then run the app in this event loop.
+To use the synchronous version set ``KIVY_EVENTLOOP`` to ``'default'``
+or leave it unset.
+
+Alternatively, rather than running :func:`runTouchApp` or :meth:`App.run`,
+schedule :func:`async_runTouchApp` or :meth:`App.async_run` in your running
+async event loop to run it asynchronously.
+
+.. versionadded:: 1.10.1
+
 '''
 
 __all__ = ('App', )
@@ -316,7 +333,7 @@ import os
 from inspect import getfile
 from os.path import dirname, join, exists, sep, expanduser, isfile
 from kivy.config import ConfigParser
-from kivy.base import runTouchApp, stopTouchApp
+from kivy.base import runTouchApp, async_runTouchApp, stopTouchApp
 from kivy.compat import string_types
 from kivy.factory import Factory
 from kivy.logger import Logger
@@ -327,9 +344,13 @@ from kivy.utils import platform
 from kivy.uix.widget import Widget
 from kivy.properties import ObjectProperty, StringProperty
 from kivy.setupconfig import USE_SDL2
+try:
+    from kivy.app_async import AsyncApp
+except SyntaxError:
+    from kivy.compat import PY3CompatCls as AsyncApp
 
 
-class App(EventDispatcher):
+class App(AsyncApp, EventDispatcher):
     ''' Application class, see module documentation for more information.
 
     :Events:
@@ -791,9 +812,7 @@ class App(EventDispatcher):
             self._app_name = clsname.lower()
         return self._app_name
 
-    def run(self):
-        '''Launches the app in standalone mode.
-        '''
+    def _run_prepare(self):
         if not self.built:
             self.load_config()
             self.load_kv(filename=self.kv_file)
@@ -823,6 +842,11 @@ class App(EventDispatcher):
             return
 
         self.dispatch('on_start')
+
+    def run(self):
+        '''Launches the app in standalone mode.
+        '''
+        self._run_prepare()
         runTouchApp()
         self.stop()
 

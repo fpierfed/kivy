@@ -16,10 +16,12 @@ __all__ = (
     'ExceptionManagerBase',
     'ExceptionManager',
     'runTouchApp',
+    'async_runTouchApp',
     'stopTouchApp',
 )
 
 import sys
+import os
 from kivy.config import Config
 from kivy.logger import Logger
 from kivy.utils import platform
@@ -27,6 +29,11 @@ from kivy.clock import Clock
 from kivy.event import EventDispatcher
 from kivy.lang import Builder
 from kivy.context import register_context
+try:
+    from kivy.base_async import AsyncEventLoopBase, async_runTouchApp
+except SyntaxError:
+    from kivy.compat import PY3CompatCls as AsyncEventLoopBase
+    async_runTouchApp = None
 
 # private vars
 EventLoop = None
@@ -91,7 +98,7 @@ class ExceptionManagerBase:
 ExceptionManager = register_context('ExceptionManager', ExceptionManagerBase)
 
 
-class EventLoopBase(EventDispatcher):
+class EventLoopBase(AsyncEventLoopBase, EventDispatcher):
     '''Main event loop. This loop handles the updating of input and
     dispatching events.
     '''
@@ -324,6 +331,21 @@ class EventLoopBase(EventDispatcher):
         while input_events:
             post_dispatch_input(*pop(0))
 
+    def mainloop(self):
+        while not self.quit and self.status == 'started':
+            try:
+                self.idle()
+                if self.window:
+                    self.window.mainloop()
+            except BaseException as inst:
+                # use exception manager first
+                r = ExceptionManager.handle_exception(inst)
+                if r == ExceptionManager.RAISE:
+                    stopTouchApp()
+                    raise
+                else:
+                    pass
+
     def idle(self):
         '''This function is called after every frame. By default:
 
@@ -394,49 +416,7 @@ class EventLoopBase(EventDispatcher):
 EventLoop = EventLoopBase()
 
 
-def _run_mainloop():
-    '''If no window has been created, this will be the executed mainloop.'''
-    while True:
-        try:
-            EventLoop.run()
-            stopTouchApp()
-            break
-        except BaseException as inst:
-            # use exception manager first
-            r = ExceptionManager.handle_exception(inst)
-            if r == ExceptionManager.RAISE:
-                stopTouchApp()
-                raise
-            else:
-                pass
-
-
-def runTouchApp(widget=None, slave=False):
-    '''Static main function that starts the application loop.
-    You can access some magic via the following arguments:
-
-    :Parameters:
-        `<empty>`
-            To make dispatching work, you need at least one
-            input listener. If not, application will leave.
-            (MTWindow act as an input listener)
-
-        `widget`
-            If you pass only a widget, a MTWindow will be created
-            and your widget will be added to the window as the root
-            widget.
-
-        `slave`
-            No event dispatching is done. This will be your job.
-
-        `widget + slave`
-            No event dispatching is done. This will be your job but
-            we try to get the window (must be created by you beforehand)
-            and add the widget to it. Very useful for embedding Kivy
-            in another toolkit. (like Qt, check kivy-designed)
-
-    '''
-
+def _runTouchApp_prepare(widget=None, slave=False):
     from kivy.input import MotionEventFactory, kivy_postproc_modules
 
     # Ok, we got one widget, and we are not in slave mode
@@ -480,10 +460,6 @@ def runTouchApp(widget=None, slave=False):
     if platform == 'android':
         Clock.schedule_once(EventLoop.remove_android_splash)
 
-    # we are in a slave mode, don't do dispatching.
-    if slave:
-        return
-
     # in non-slave mode, they are 2 issues
     #
     # 1. if user created a window, call the mainloop from window.
@@ -495,11 +471,41 @@ def runTouchApp(widget=None, slave=False):
     # 2. if no window is created, we are dispatching event loop
     #    ourself (previous behavior.)
     #
+
+
+def runTouchApp(widget=None, slave=False):
+    '''Static main function that starts the application loop.
+    You can access some magic via the following arguments:
+
+    :Parameters:
+        `<empty>`
+            To make dispatching work, you need at least one
+            input listener. If not, application will leave.
+            (MTWindow act as an input listener)
+
+        `widget`
+            If you pass only a widget, a MTWindow will be created
+            and your widget will be added to the window as the root
+            widget.
+
+        `slave`
+            No event dispatching is done. This will be your job.
+
+        `widget + slave`
+            No event dispatching is done. This will be your job but
+            we try to get the window (must be created by you beforehand)
+            and add the widget to it. Very useful for embedding Kivy
+            in another toolkit. (like Qt, check kivy-designed)
+
+    '''
+    _runTouchApp_prepare(widget=widget, slave=slave)
+
+    # we are in a slave mode, don't do dispatching.
+    if slave:
+        return
+
     try:
-        if EventLoop.window is None:
-            _run_mainloop()
-        else:
-            EventLoop.window.mainloop()
+        EventLoop.mainloop()
     finally:
         stopTouchApp()
 
